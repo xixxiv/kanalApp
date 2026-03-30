@@ -3,13 +3,13 @@ import re
 import pandas as pd
 from datetime import datetime
 import io
-import zipfile  # ZIP 처리를 위해 필수 추가
+import zipfile
 
 # --- 웹 페이지 기본 설정 ---
 st.set_page_config(page_title="카카오톡 단톡방 분석기", layout="wide", page_icon="📊")
 st.title("📊 카카오톡 단톡방 인원 및 활동 분석기")
 
-# --- 메시지 정규화 함수 (중복 매칭용) ---
+# --- 메시지 정규화 함수 ---
 def normalize_msg(msg):
     msg = re.sub(r'\(?(이모티콘|Emoticons)\)?', '', msg)
     msg = re.sub(r'^이모티콘\s+', '', msg)
@@ -19,7 +19,6 @@ def normalize_msg(msg):
 # --- 코어 파싱 로직 ---
 def parse_kakao_file(file_content):
     data = []
-    # 정규식 패턴 설정
     date_pattern_1 = re.compile(r"^-+ (\d{4})년 (\d{1,2})월 (\d{1,2})일 .*-+$") 
     date_pattern_2 = re.compile(r"^(\d{4})년 (\d{1,2})월 (\d{1,2})일 [월화수목금토일]요일$") 
     chat_pc = re.compile(r"^\[(.*?)\] \[(오전|오후) (\d{1,2}):(\d{1,2})\] (.*)$")
@@ -107,17 +106,15 @@ def parse_kakao_file(file_content):
             data[-1]['Message'] += '\n' + line.replace('\r', '').replace('\n', '')
     return pd.DataFrame(data)
 
-# --- 웹 인터페이스 ---
+# --- 웹 인터페이스 구성 ---
 st.markdown("### 📂 파일 업로드")
-# 이 변수가 반드시 정의되어야 NameError가 발생하지 않습니다.
 uploaded_files = st.file_uploader("카카오톡 텍스트(.txt) 또는 압축파일(.zip)을 업로드하세요.", type=["txt", "zip"], accept_multiple_files=True)
 
 if uploaded_files:
     if st.button("분석 시작", type="primary"):
-        with st.spinner("데이터 분석 및 병합 중..."):
+        with st.spinner("데이터 분석 및 지능형 병합 중..."):
             df_list = []
             for uf in uploaded_files:
-                # ZIP 파일 처리
                 if uf.name.lower().endswith('.zip'):
                     try:
                         with zipfile.ZipFile(uf) as z:
@@ -127,18 +124,20 @@ if uploaded_files:
                                     content = f.read().decode('utf-8-sig')
                                     df_list.append(parse_kakao_file(content))
                     except Exception as e:
-                        st.error(f"ZIP 파일을 읽는 중 에러: {uf.name} ({e})")
-                # TXT 파일 처리
+                        st.error(f"ZIP 읽기 에러: {uf.name} ({e})")
                 elif uf.name.lower().endswith('.txt'):
                     content = uf.read().decode('utf-8-sig')
                     df_list.append(parse_kakao_file(content))
             
             df_combined = pd.concat([d for d in df_list if not d.empty], ignore_index=True)
-            if df_combined.empty: st.stop()
+            if df_combined.empty: 
+                st.warning("분석할 유효한 데이터가 없습니다.")
+                st.stop()
 
-            # --- 병합 및 중복 제거 ---
+            # --- 중복 제거 및 병합 로직 ---
             source_priority = {'iPhone': 0, 'Android': 1, 'PC': 2}
             
+            # 채팅 정제
             df_chat = df_combined[df_combined['Type'] == 'Chat'].copy()
             df_chat['Match_Msg'] = df_chat['Message'].apply(normalize_msg)
             df_chat['Minute_Key'] = df_chat['Datetime'].dt.strftime('%Y-%m-%d %H:%M')
@@ -149,6 +148,7 @@ if uploaded_files:
             df_chat = df_chat.sort_values(by=['Minute_Key', 'Name', 'Match_Msg', 'Seq', 'Priority'])
             df_chat_cleaned = df_chat.drop_duplicates(subset=['Minute_Key', 'Name', 'Match_Msg', 'Seq'], keep='first')
 
+            # 시스템 정제
             df_sys = df_combined[df_combined['Type'] == 'System'].copy()
             if not df_sys.empty:
                 df_sys['Priority'] = df_sys['Source'].map(source_priority).fillna(9)
@@ -157,54 +157,55 @@ if uploaded_files:
 
             df_final_master = pd.concat([df_chat_cleaned, df_sys_cleaned]).sort_values('Datetime').reset_index(drop=True)
             
-# --- (중략) ---
-
-            # 집계 생성
+            # --- 집계 로직 ---
             summary = df_chat_cleaned[df_chat_cleaned['Name'] != '시스템'].groupby('Name').agg(Last_Chat_Date=('Datetime', 'max'), Last_Message=('Message', 'last'), Count=('Message', 'count')).reset_index()
             
             def get_history(x):
                 x = x.sort_values('Datetime')
-                # 입장, 퇴장, 강퇴 메시지 리스트 생성
                 actions = [f"[{row['Date']}] 입장" if "들어왔습니다" in row['Message'] else (f"[{row['Date']}] 퇴장" if "나갔습니다" in row['Message'] else f"[{row['Date']}] 강퇴") 
                            for _, row in x.iterrows() if any(k in row['Message'] for k in ["들어왔습니다", "나갔습니다", "내보냈습니다"])]
-                
                 if not actions:
                     return pd.Series({'First_Action': '-', 'Action_History': '-', 'Last_Action_Type': x.iloc[-1]['Message']})
                 
-                # [수정된 로직]
-                # 첫 번째 기록이 '입장'인 경우 -> 최초 입장에 기록하고 나머지를 히스토리에 배치
+                # [강퇴기록 복구 로직]
                 if "입장" in actions[0]:
                     first = actions[0]
                     history_list = actions[1:]
-                # 첫 번째 기록이 '입장'이 아닌 경우 (로그 중간부터 기록된 경우) -> 최초 입장은 '-'로 두고 모든 기록을 히스토리에 배치
                 else:
                     first = '-'
-                    history_list = actions[:]
+                    history_list = actions[:] # 입장 기록 없으면 전체를 히스토리에 포함
                 
-                # 히스토리는 최신순으로 보여주기 위해 역순 정렬
                 history = '\n'.join(history_list[::-1]) if history_list else '-'
-                
                 return pd.Series({'First_Action': first, 'Action_History': history, 'Last_Action_Type': x.iloc[-1]['Message']})
             
-            # include_groups=False를 추가하여 경고 방지
             sys_sum = df_sys_cleaned.groupby('Name').apply(get_history, include_groups=False).reset_index() if not df_sys_cleaned.empty else pd.DataFrame(columns=['Name', 'First_Action', 'Action_History', 'Last_Action_Type'])
+            
+            final_summary = pd.merge(summary, sys_sum, on='Name', how='outer').fillna({'Count':0, 'Last_Message':'-', 'First_Action':'-', 'Action_History':'-'})
+            is_exited = final_summary['Last_Action_Type'].str.contains('나갔습니다|내보냈습니다', na=False)
 
-# --- (이하 동일) ---
-
+            # --- 결과 뷰 데이터 생성 ---
             df_curr = final_summary[~is_exited].drop(columns=['Last_Action_Type']).sort_values('Count', ascending=False)
             df_exit = final_summary[is_exited].drop(columns=['Last_Action_Type']).sort_values('Count', ascending=False)
             df_sleep = final_summary[~is_exited].drop(columns=['Last_Action_Type']).sort_values('Last_Chat_Date', ascending=True)
 
+            # --- 테이블 가독성 설정 (너비 조절) ---
             col_cfg = {
                 "Last_Message": st.column_config.TextColumn("마지막 메시지", width="medium"),
                 "Name": st.column_config.TextColumn("이름", width="medium"),
-                "Action_History": st.column_config.TextColumn("활동 히스토리", width="medium")
+                "Action_History": st.column_config.TextColumn("활동 히스토리", width="medium"),
+                "Count": st.column_config.NumberColumn("채팅수", width="small")
             }
 
             st.success(f"분석 완료! (총 {len(df_final_master)}행)")
+            
+            # --- 탭 출력 (NameError 방지를 위해 모든 탭 렌더링 코드를 버튼 클릭 블록 안으로 이동) ---
             tab1, tab2, tab3, tab4 = st.tabs([f"🟢 현재 인원 ({len(df_curr)}명)", f"🔴 나간 인원 ({len(df_exit)}명)", "💤 잠수 인원", "📝 Raw Log"])
             
-            with tab1: st.dataframe(df_curr, width='stretch', hide_index=True, column_config=col_cfg)
-            with tab2: st.dataframe(df_exit, width='stretch', hide_index=True, column_config=col_cfg)
-            with tab3: st.dataframe(df_sleep, width='stretch', hide_index=True, column_config=col_cfg)
-            with tab4: st.dataframe(df_final_master, width='stretch', hide_index=True)
+            with tab1:
+                st.dataframe(df_curr, width='stretch', hide_index=True, column_config=col_cfg)
+            with tab2:
+                st.dataframe(df_exit, width='stretch', hide_index=True, column_config=col_cfg)
+            with tab3:
+                st.dataframe(df_sleep, width='stretch', hide_index=True, column_config=col_cfg)
+            with tab4:
+                st.dataframe(df_final_master, width='stretch', hide_index=True)
