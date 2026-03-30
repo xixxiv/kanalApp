@@ -157,18 +157,39 @@ if uploaded_files:
 
             df_final_master = pd.concat([df_chat_cleaned, df_sys_cleaned]).sort_values('Datetime').reset_index(drop=True)
             
-            # --- 집계 ---
+# --- (중략) ---
+
+            # 집계 생성
             summary = df_chat_cleaned[df_chat_cleaned['Name'] != '시스템'].groupby('Name').agg(Last_Chat_Date=('Datetime', 'max'), Last_Message=('Message', 'last'), Count=('Message', 'count')).reset_index()
+            
             def get_history(x):
                 x = x.sort_values('Datetime')
-                actions = [f"[{row['Date']}] 입장" if "들어왔습니다" in row['Message'] else (f"[{row['Date']}] 퇴장" if "나갔습니다" in row['Message'] else f"[{row['Date']}] 강퇴") for _, row in x.iterrows() if any(k in row['Message'] for k in ["들어왔습니다", "나갔습니다", "내보냈습니다"])]
-                first = actions[0] if actions and "입장" in actions[0] else '-'
-                history = '\n'.join(actions[1:][::-1]) if len(actions)>1 else '-'
+                # 입장, 퇴장, 강퇴 메시지 리스트 생성
+                actions = [f"[{row['Date']}] 입장" if "들어왔습니다" in row['Message'] else (f"[{row['Date']}] 퇴장" if "나갔습니다" in row['Message'] else f"[{row['Date']}] 강퇴") 
+                           for _, row in x.iterrows() if any(k in row['Message'] for k in ["들어왔습니다", "나갔습니다", "내보냈습니다"])]
+                
+                if not actions:
+                    return pd.Series({'First_Action': '-', 'Action_History': '-', 'Last_Action_Type': x.iloc[-1]['Message']})
+                
+                # [수정된 로직]
+                # 첫 번째 기록이 '입장'인 경우 -> 최초 입장에 기록하고 나머지를 히스토리에 배치
+                if "입장" in actions[0]:
+                    first = actions[0]
+                    history_list = actions[1:]
+                # 첫 번째 기록이 '입장'이 아닌 경우 (로그 중간부터 기록된 경우) -> 최초 입장은 '-'로 두고 모든 기록을 히스토리에 배치
+                else:
+                    first = '-'
+                    history_list = actions[:]
+                
+                # 히스토리는 최신순으로 보여주기 위해 역순 정렬
+                history = '\n'.join(history_list[::-1]) if history_list else '-'
+                
                 return pd.Series({'First_Action': first, 'Action_History': history, 'Last_Action_Type': x.iloc[-1]['Message']})
             
+            # include_groups=False를 추가하여 경고 방지
             sys_sum = df_sys_cleaned.groupby('Name').apply(get_history, include_groups=False).reset_index() if not df_sys_cleaned.empty else pd.DataFrame(columns=['Name', 'First_Action', 'Action_History', 'Last_Action_Type'])
-            final_summary = pd.merge(summary, sys_sum, on='Name', how='outer').fillna({'Count':0, 'Last_Message':'-', 'First_Action':'-', 'Action_History':'-'})
-            is_exited = final_summary['Last_Action_Type'].str.contains('나갔습니다|내보냈습니다', na=False)
+
+# --- (이하 동일) ---
 
             df_curr = final_summary[~is_exited].drop(columns=['Last_Action_Type']).sort_values('Count', ascending=False)
             df_exit = final_summary[is_exited].drop(columns=['Last_Action_Type']).sort_values('Count', ascending=False)
