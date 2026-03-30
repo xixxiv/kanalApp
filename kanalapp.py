@@ -3,53 +3,23 @@ import re
 import pandas as pd
 from datetime import datetime
 import io
+import zipfile  # ZIP 처리를 위해 필수 추가
 
 # --- 웹 페이지 기본 설정 ---
 st.set_page_config(page_title="카카오톡 단톡방 분석기", layout="wide", page_icon="📊")
 st.title("📊 카카오톡 단톡방 인원 및 활동 분석기")
 
-# --- 메시지 정규화 함수 ---
+# --- 메시지 정규화 함수 (중복 매칭용) ---
 def normalize_msg(msg):
     msg = re.sub(r'\(?(이모티콘|Emoticons)\)?', '', msg)
     msg = re.sub(r'^이모티콘\s+', '', msg)
     msg = msg.replace("'일정 취소'", "'일정 삭제'").strip()
     return msg
-import zipfile  # 상단에 추가
-
-# ... (기존 parse_kakao_file 함수는 그대로 유지) ...
-
-if uploaded_files:
-    if st.button("분석 시작", type="primary"):
-        with st.spinner("데이터 분석 및 병합 중..."):
-            df_list = []
-            
-            for uf in uploaded_files:
-                # [파일 확장자 체크]
-                if uf.name.lower().endswith('.zip'):
-                    try:
-                        with zipfile.ZipFile(uf) as z:
-                            # zip 안에 들어있는 파일 목록 중 .txt 파일만 찾기
-                            txt_in_zip = [f for f in z.namelist() if f.lower().endswith('.txt')]
-                            
-                            for txt_file in txt_in_zip:
-                                with z.open(txt_file) as f:
-                                    # 바이트 데이터를 텍스트로 변환 (utf-8-sig 적용)
-                                    content = f.read().decode('utf-8-sig')
-                                    df_list.append(parse_kakao_file(content))
-                    except Exception as e:
-                        st.error(f"ZIP 파일을 읽는 중 오류가 발생했습니다 ({uf.name}): {e}")
-                
-                elif uf.name.lower().endswith('.txt'):
-                    content = uf.read().decode('utf-8-sig')
-                    df_list.append(parse_kakao_file(content))
-            
-            # 이후 병합 로직은 기존과 동일
-            df_combined = pd.concat([d for d in df_list if not d.empty], ignore_index=True)
-            # ... (이하 중복 제거 및 시각화 로직)
 
 # --- 코어 파싱 로직 ---
 def parse_kakao_file(file_content):
     data = []
+    # 정규식 패턴 설정
     date_pattern_1 = re.compile(r"^-+ (\d{4})년 (\d{1,2})월 (\d{1,2})일 .*-+$") 
     date_pattern_2 = re.compile(r"^(\d{4})년 (\d{1,2})월 (\d{1,2})일 [월화수목금토일]요일$") 
     chat_pc = re.compile(r"^\[(.*?)\] \[(오전|오후) (\d{1,2}):(\d{1,2})\] (.*)$")
@@ -75,8 +45,7 @@ def parse_kakao_file(file_content):
         if match_date:
             y, m, d = match_date.groups()
             current_date = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
-            last_seen_minute_key = None
-            ms_offset = 0
+            last_seen_minute_key = None; ms_offset = 0
             continue
         
         m_hidden_ios = hidden_msg_ios.match(line_clean)
@@ -139,18 +108,37 @@ def parse_kakao_file(file_content):
     return pd.DataFrame(data)
 
 # --- 웹 인터페이스 ---
-uploaded_files = st.file_uploader("카카오톡 텍스트 파일을 업로드하세요.", type="txt", accept_multiple_files=True)
+st.markdown("### 📂 파일 업로드")
+# 이 변수가 반드시 정의되어야 NameError가 발생하지 않습니다.
+uploaded_files = st.file_uploader("카카오톡 텍스트(.txt) 또는 압축파일(.zip)을 업로드하세요.", type=["txt", "zip"], accept_multiple_files=True)
 
 if uploaded_files:
     if st.button("분석 시작", type="primary"):
-        with st.spinner("데이터 분석 중..."):
-            df_list = [parse_kakao_file(uf.read().decode('utf-8-sig')) for uf in uploaded_files]
+        with st.spinner("데이터 분석 및 병합 중..."):
+            df_list = []
+            for uf in uploaded_files:
+                # ZIP 파일 처리
+                if uf.name.lower().endswith('.zip'):
+                    try:
+                        with zipfile.ZipFile(uf) as z:
+                            txt_files = [f for f in z.namelist() if f.lower().endswith('.txt')]
+                            for t_file in txt_files:
+                                with z.open(t_file) as f:
+                                    content = f.read().decode('utf-8-sig')
+                                    df_list.append(parse_kakao_file(content))
+                    except Exception as e:
+                        st.error(f"ZIP 파일을 읽는 중 에러: {uf.name} ({e})")
+                # TXT 파일 처리
+                elif uf.name.lower().endswith('.txt'):
+                    content = uf.read().decode('utf-8-sig')
+                    df_list.append(parse_kakao_file(content))
+            
             df_combined = pd.concat([d for d in df_list if not d.empty], ignore_index=True)
             if df_combined.empty: st.stop()
 
+            # --- 병합 및 중복 제거 ---
             source_priority = {'iPhone': 0, 'Android': 1, 'PC': 2}
             
-            # 채팅 중복 제거
             df_chat = df_combined[df_combined['Type'] == 'Chat'].copy()
             df_chat['Match_Msg'] = df_chat['Message'].apply(normalize_msg)
             df_chat['Minute_Key'] = df_chat['Datetime'].dt.strftime('%Y-%m-%d %H:%M')
@@ -161,7 +149,6 @@ if uploaded_files:
             df_chat = df_chat.sort_values(by=['Minute_Key', 'Name', 'Match_Msg', 'Seq', 'Priority'])
             df_chat_cleaned = df_chat.drop_duplicates(subset=['Minute_Key', 'Name', 'Match_Msg', 'Seq'], keep='first')
 
-            # 시스템 메시지 중복 제거
             df_sys = df_combined[df_combined['Type'] == 'System'].copy()
             if not df_sys.empty:
                 df_sys['Priority'] = df_sys['Source'].map(source_priority).fillna(9)
@@ -170,7 +157,7 @@ if uploaded_files:
 
             df_final_master = pd.concat([df_chat_cleaned, df_sys_cleaned]).sort_values('Datetime').reset_index(drop=True)
             
-            # 집계 로직
+            # --- 집계 ---
             summary = df_chat_cleaned[df_chat_cleaned['Name'] != '시스템'].groupby('Name').agg(Last_Chat_Date=('Datetime', 'max'), Last_Message=('Message', 'last'), Count=('Message', 'count')).reset_index()
             def get_history(x):
                 x = x.sort_values('Datetime')
@@ -179,17 +166,14 @@ if uploaded_files:
                 history = '\n'.join(actions[1:][::-1]) if len(actions)>1 else '-'
                 return pd.Series({'First_Action': first, 'Action_History': history, 'Last_Action_Type': x.iloc[-1]['Message']})
             
-            # [수정 1] include_groups=False 추가로 FutureWarning 해결
             sys_sum = df_sys_cleaned.groupby('Name').apply(get_history, include_groups=False).reset_index() if not df_sys_cleaned.empty else pd.DataFrame(columns=['Name', 'First_Action', 'Action_History', 'Last_Action_Type'])
             final_summary = pd.merge(summary, sys_sum, on='Name', how='outer').fillna({'Count':0, 'Last_Message':'-', 'First_Action':'-', 'Action_History':'-'})
             is_exited = final_summary['Last_Action_Type'].str.contains('나갔습니다|내보냈습니다', na=False)
 
-            # 뷰 생성
             df_curr = final_summary[~is_exited].drop(columns=['Last_Action_Type']).sort_values('Count', ascending=False)
             df_exit = final_summary[is_exited].drop(columns=['Last_Action_Type']).sort_values('Count', ascending=False)
             df_sleep = final_summary[~is_exited].drop(columns=['Last_Action_Type']).sort_values('Last_Chat_Date', ascending=True)
 
-            # [수정 2] width="stretch" 설정으로 DeprecationWarning 해결
             col_cfg = {
                 "Last_Message": st.column_config.TextColumn("마지막 메시지", width="medium"),
                 "Name": st.column_config.TextColumn("이름", width="medium"),
@@ -199,7 +183,6 @@ if uploaded_files:
             st.success(f"분석 완료! (총 {len(df_final_master)}행)")
             tab1, tab2, tab3, tab4 = st.tabs([f"🟢 현재 인원 ({len(df_curr)}명)", f"🔴 나간 인원 ({len(df_exit)}명)", "💤 잠수 인원", "📝 Raw Log"])
             
-            # width='stretch' 적용
             with tab1: st.dataframe(df_curr, width='stretch', hide_index=True, column_config=col_cfg)
             with tab2: st.dataframe(df_exit, width='stretch', hide_index=True, column_config=col_cfg)
             with tab3: st.dataframe(df_sleep, width='stretch', hide_index=True, column_config=col_cfg)
