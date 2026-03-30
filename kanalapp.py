@@ -14,6 +14,38 @@ def normalize_msg(msg):
     msg = re.sub(r'^이모티콘\s+', '', msg)
     msg = msg.replace("'일정 취소'", "'일정 삭제'").strip()
     return msg
+import zipfile  # 상단에 추가
+
+# ... (기존 parse_kakao_file 함수는 그대로 유지) ...
+
+if uploaded_files:
+    if st.button("분석 시작", type="primary"):
+        with st.spinner("데이터 분석 및 병합 중..."):
+            df_list = []
+            
+            for uf in uploaded_files:
+                # [파일 확장자 체크]
+                if uf.name.lower().endswith('.zip'):
+                    try:
+                        with zipfile.ZipFile(uf) as z:
+                            # zip 안에 들어있는 파일 목록 중 .txt 파일만 찾기
+                            txt_in_zip = [f for f in z.namelist() if f.lower().endswith('.txt')]
+                            
+                            for txt_file in txt_in_zip:
+                                with z.open(txt_file) as f:
+                                    # 바이트 데이터를 텍스트로 변환 (utf-8-sig 적용)
+                                    content = f.read().decode('utf-8-sig')
+                                    df_list.append(parse_kakao_file(content))
+                    except Exception as e:
+                        st.error(f"ZIP 파일을 읽는 중 오류가 발생했습니다 ({uf.name}): {e}")
+                
+                elif uf.name.lower().endswith('.txt'):
+                    content = uf.read().decode('utf-8-sig')
+                    df_list.append(parse_kakao_file(content))
+            
+            # 이후 병합 로직은 기존과 동일
+            df_combined = pd.concat([d for d in df_list if not d.empty], ignore_index=True)
+            # ... (이하 중복 제거 및 시각화 로직)
 
 # --- 코어 파싱 로직 ---
 def parse_kakao_file(file_content):
