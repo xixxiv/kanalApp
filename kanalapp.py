@@ -122,8 +122,10 @@ def parse_kakao_file(file_content):
 
 # --- 웹 인터페이스 구성 ---
 st.info("""
-**카카오톡 텍스트(.txt) 또는 압축파일(.zip)을 업로드하세요.** iOS/안드로이드/PC 버전의 대화 파일을 모두 지원하지만  
-PC버전은 중간중간 대화가 끊겨있을 수 있기 때문에 모바일 기기의 대화 백업을 이용하시는 것을 추천드립니다.
+**카카오톡 텍스트(.txt) 또는 압축파일(.zip)을 업로드하세요.**
+iOS/안드로이드/PC 버전의 대화 파일을 모두 지원하지만  
+PC버전은 중간중간 대화가 끊겨있을 수 있기 때문에
+**모바일 기기의 대화 백업**을 이용하시는 것을 추천드립니다.
 """)
 
 uploaded_files = st.file_uploader("파일 업로드", type=["txt", "zip"], accept_multiple_files=True, label_visibility="collapsed")
