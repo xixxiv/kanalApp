@@ -137,7 +137,6 @@ if uploaded_files:
             # --- 중복 제거 및 병합 로직 ---
             source_priority = {'iPhone': 0, 'Android': 1, 'PC': 2}
             
-            # 채팅 정제
             df_chat = df_combined[df_combined['Type'] == 'Chat'].copy()
             df_chat['Match_Msg'] = df_chat['Message'].apply(normalize_msg)
             df_chat['Minute_Key'] = df_chat['Datetime'].dt.strftime('%Y-%m-%d %H:%M')
@@ -148,7 +147,6 @@ if uploaded_files:
             df_chat = df_chat.sort_values(by=['Minute_Key', 'Name', 'Match_Msg', 'Seq', 'Priority'])
             df_chat_cleaned = df_chat.drop_duplicates(subset=['Minute_Key', 'Name', 'Match_Msg', 'Seq'], keep='first')
 
-            # 시스템 정제
             df_sys = df_combined[df_combined['Type'] == 'System'].copy()
             if not df_sys.empty:
                 df_sys['Priority'] = df_sys['Source'].map(source_priority).fillna(9)
@@ -164,31 +162,37 @@ if uploaded_files:
                 x = x.sort_values('Datetime')
                 actions = [f"[{row['Date']}] 입장" if "들어왔습니다" in row['Message'] else (f"[{row['Date']}] 퇴장" if "나갔습니다" in row['Message'] else f"[{row['Date']}] 강퇴") 
                            for _, row in x.iterrows() if any(k in row['Message'] for k in ["들어왔습니다", "나갔습니다", "내보냈습니다"])]
-                if not actions:
-                    return pd.Series({'First_Action': '-', 'Action_History': '-', 'Last_Action_Type': x.iloc[-1]['Message']})
                 
-                # [강퇴기록 복구 로직]
+                # 정렬을 위한 가장 최근 시스템 일자 추출
+                last_sys_date = x.iloc[-1]['Datetime'] if not x.empty else pd.Timestamp.min
+                
+                if not actions:
+                    return pd.Series({'First_Action': '-', 'Action_History': '-', 'Last_Action_Type': x.iloc[-1]['Message'], 'Last_Sys_Date': last_sys_date})
+                
                 if "입장" in actions[0]:
                     first = actions[0]
                     history_list = actions[1:]
                 else:
                     first = '-'
-                    history_list = actions[:] # 입장 기록 없으면 전체를 히스토리에 포함
+                    history_list = actions[:]
                 
                 history = '\n'.join(history_list[::-1]) if history_list else '-'
-                return pd.Series({'First_Action': first, 'Action_History': history, 'Last_Action_Type': x.iloc[-1]['Message']})
+                return pd.Series({'First_Action': first, 'Action_History': history, 'Last_Action_Type': x.iloc[-1]['Message'], 'Last_Sys_Date': last_sys_date})
             
-            sys_sum = df_sys_cleaned.groupby('Name').apply(get_history, include_groups=False).reset_index() if not df_sys_cleaned.empty else pd.DataFrame(columns=['Name', 'First_Action', 'Action_History', 'Last_Action_Type'])
+            sys_sum = df_sys_cleaned.groupby('Name').apply(get_history, include_groups=False).reset_index() if not df_sys_cleaned.empty else pd.DataFrame(columns=['Name', 'First_Action', 'Action_History', 'Last_Action_Type', 'Last_Sys_Date'])
             
             final_summary = pd.merge(summary, sys_sum, on='Name', how='outer').fillna({'Count':0, 'Last_Message':'-', 'First_Action':'-', 'Action_History':'-'})
             is_exited = final_summary['Last_Action_Type'].str.contains('나갔습니다|내보냈습니다', na=False)
 
-            # --- 결과 뷰 데이터 생성 ---
-            df_curr = final_summary[~is_exited].drop(columns=['Last_Action_Type']).sort_values('Count', ascending=False)
-            df_exit = final_summary[is_exited].drop(columns=['Last_Action_Type']).sort_values('Count', ascending=False)
-            df_sleep = final_summary[~is_exited].drop(columns=['Last_Action_Type']).sort_values('Last_Chat_Date', ascending=True)
+            # --- 결과 뷰 데이터 생성 (정렬 조건 반영) ---
+            df_curr = final_summary[~is_exited].drop(columns=['Last_Action_Type', 'Last_Sys_Date']).sort_values('Count', ascending=False)
+            
+            # [요청 사항] 나간 인원은 활동 히스토리가 가장 최근인 순서대로 정렬
+            df_exit = final_summary[is_exited].sort_values('Last_Sys_Date', ascending=False).drop(columns=['Last_Action_Type', 'Last_Sys_Date'])
+            
+            df_sleep = final_summary[~is_exited].drop(columns=['Last_Action_Type', 'Last_Sys_Date']).sort_values('Last_Chat_Date', ascending=True)
 
-            # --- 테이블 가독성 설정 (너비 조절) ---
+            # --- 테이블 가독성 설정 ---
             col_cfg = {
                 "Last_Message": st.column_config.TextColumn("마지막 메시지", width="medium"),
                 "Name": st.column_config.TextColumn("이름", width="medium"),
@@ -198,7 +202,6 @@ if uploaded_files:
 
             st.success(f"분석 완료! (총 {len(df_final_master)}행)")
             
-            # --- 탭 출력 (NameError 방지를 위해 모든 탭 렌더링 코드를 버튼 클릭 블록 안으로 이동) ---
             tab1, tab2, tab3, tab4 = st.tabs([f"🟢 현재 인원 ({len(df_curr)}명)", f"🔴 나간 인원 ({len(df_exit)}명)", "💤 잠수 인원", "📝 Raw Log"])
             
             with tab1:
