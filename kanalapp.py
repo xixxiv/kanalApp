@@ -9,6 +9,20 @@ import zipfile
 st.set_page_config(page_title="카카오톡 단톡방 분석기", layout="wide", page_icon="📊")
 st.title("📊 카카오톡 단톡방 인원 및 활동 분석기")
 
+# [최적화 1] 정규표현식 글로벌 컴파일 (매번 생성되는 오버헤드 제거)
+DATE_PATTERN_1 = re.compile(r"^-+ (\d{4})년 (\d{1,2})월 (\d{1,2})일 .*-+$") 
+DATE_PATTERN_2 = re.compile(r"^(\d{4})년 (\d{1,2})월 (\d{1,2})일 [월화수목금토일]요일$") 
+CHAT_PC = re.compile(r"^\[(.*?)\] \[(오전|오후) (\d{1,2}):(\d{1,2})\] (.*)$")
+CHAT_IOS = re.compile(r"^(\d{4})\. ?(\d{1,2})\. ?(\d{1,2})\. (?:(오전|오후) )?(\d{1,2}):(\d{1,2}), (.*?) : (.*)$")
+CHAT_AND = re.compile(r"^(\d{4})년 (\d{1,2})월 (\d{1,2})일 (오전|오후) (\d{1,2}):(\d{1,2}), (.*?) : (.*)$")
+HIDDEN_MSG_TEXT = "관리자가 메시지를 가렸습니다."
+HIDDEN_MSG_IOS = re.compile(r"^(\d{4})\. ?(\d{1,2})\. ?(\d{1,2})\. (?:(오전|오후) )?(\d{1,2}):(\d{1,2}): (관리자가 메시지를 가렸습니다\.)$")
+SYS_ACTION_PATTERN = r"(들어왔습니다\.|나갔습니다\.|내보냈습니다\.)"
+SYS_PC = re.compile(rf"^(.*?)(님이|님을) {SYS_ACTION_PATTERN}")
+SYS_IOS = re.compile(rf"^(\d{{4}})\. ?(\d{{1,2}})\. ?(\d{{1,2}})\. (?:(오전|오후) )?(\d{{1,2}}):(\d{{1,2}})[,:] (.*?)(님이|님을) {SYS_ACTION_PATTERN}")
+SYS_AND = re.compile(rf"^(\d{{4}})년 (\d{{1,2}})월 (\d{{1,2}})일 (오전|오후) (\d{{1,2}}):(\d{{1,2}}), (.*?)(님이|님을) {SYS_ACTION_PATTERN}")
+VALID_SYS_COMBOS = [("님이", "들어왔습니다."), ("님이", "나갔습니다."), ("님을", "내보냈습니다.")]
+
 # --- 메시지 정규화 함수 ---
 def normalize_msg(msg):
     msg = re.sub(r'\(?(이모티콘|Emoticons)\)?', '', msg)
@@ -16,53 +30,45 @@ def normalize_msg(msg):
     msg = msg.replace("'일정 취소'", "'일정 삭제'").strip()
     return msg
 
-# --- 코어 파싱 로직 ---
+# [최적화 2] Streamlit 캐싱 적용 (동일한 텍스트 파일은 재분석하지 않음)
+@st.cache_data(show_spinner=False)
 def parse_kakao_file(file_content):
     data = []
-    date_pattern_1 = re.compile(r"^-+ (\d{4})년 (\d{1,2})월 (\d{1,2})일 .*-+$") 
-    date_pattern_2 = re.compile(r"^(\d{4})년 (\d{1,2})월 (\d{1,2})일 [월화수목금토일]요일$") 
-    chat_pc = re.compile(r"^\[(.*?)\] \[(오전|오후) (\d{1,2}):(\d{1,2})\] (.*)$")
-    chat_ios = re.compile(r"^(\d{4})\. ?(\d{1,2})\. ?(\d{1,2})\. (?:(오전|오후) )?(\d{1,2}):(\d{1,2}), (.*?) : (.*)$")
-    chat_and = re.compile(r"^(\d{4})년 (\d{1,2})월 (\d{1,2})일 (오전|오후) (\d{1,2}):(\d{1,2}), (.*?) : (.*)$")
-    hidden_msg_text = "관리자가 메시지를 가렸습니다."
-    hidden_msg_ios = re.compile(r"^(\d{4})\. ?(\d{1,2})\. ?(\d{1,2})\. (?:(오전|오후) )?(\d{1,2}):(\d{1,2}): (관리자가 메시지를 가렸습니다\.)$")
-    sys_action_pattern = r"(들어왔습니다\.|나갔습니다\.|내보냈습니다\.)"
-    sys_pc = re.compile(rf"^(.*?)(님이|님을) {sys_action_pattern}")
-    sys_ios = re.compile(rf"^(\d{{4}})\. ?(\d{{1,2}})\. ?(\d{{1,2}})\. (?:(오전|오후) )?(\d{{1,2}}):(\d{{1,2}})[,:] (.*?)(님이|님을) {sys_action_pattern}")
-    sys_and = re.compile(rf"^(\d{{4}})년 (\d{{1,2}})월 (\d{{1,2}})일 (오전|오후) (\d{{1,2}}):(\d{{1,2}}), (.*?)(님이|님을) {sys_action_pattern}")
-    valid_sys_combos = [("님이", "들어왔습니다."), ("님이", "나갔습니다."), ("님을", "내보냈습니다.")]
-
     current_date = None
     last_seen_minute_key = None
     ms_offset = 0  
-    lines = file_content.splitlines()
     
-    for line in lines:
+    # splitlines()를 통한 빠른 이터레이션
+    for line in file_content.splitlines():
         line_clean = line.strip()
         if not line_clean: continue
-        match_date = date_pattern_1.match(line_clean) or date_pattern_2.match(line_clean)
+        
+        match_date = DATE_PATTERN_1.match(line_clean) or DATE_PATTERN_2.match(line_clean)
         if match_date:
             y, m, d = match_date.groups()
             current_date = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
             last_seen_minute_key = None; ms_offset = 0
             continue
         
-        m_hidden_ios = hidden_msg_ios.match(line_clean)
-        if m_hidden_ios or hidden_msg_text in line_clean:
+        m_hidden_ios = HIDDEN_MSG_IOS.match(line_clean)
+        if m_hidden_ios or HIDDEN_MSG_TEXT in line_clean:
             if m_hidden_ios:
                 y, m, d, ampm, h, mnt, _ = m_hidden_ios.groups()
                 hour = int(h)
                 if ampm == '오후' and hour != 12: hour += 12
                 if ampm == '오전' and hour == 12: hour = 0
                 minute_key = f"{current_date} {hour:02d}:{mnt.zfill(2)}"
-            else: minute_key = last_seen_minute_key if last_seen_minute_key else f"{current_date} 00:00"
+            else: 
+                minute_key = last_seen_minute_key if last_seen_minute_key else f"{current_date} 00:00"
+            
             if minute_key == last_seen_minute_key: ms_offset += 1
             else: last_seen_minute_key = minute_key; ms_offset = 0
+            
             time_str = f"{minute_key[-5:]}:00.{ms_offset:03d}"
-            data.append({'Datetime': pd.to_datetime(f"{current_date} {time_str}"), 'Date': current_date, 'Name': '시스템', 'Message': hidden_msg_text, 'Type': 'Chat', 'Source': 'iPhone' if m_hidden_ios else 'PC'})
+            data.append({'Datetime_Str': f"{current_date} {time_str}", 'Date': current_date, 'Name': '시스템', 'Message': HIDDEN_MSG_TEXT, 'Type': 'Chat', 'Source': 'iPhone' if m_hidden_ios else 'PC'})
             continue
 
-        m_pc = chat_pc.match(line_clean); m_ios = chat_ios.match(line_clean); m_and = chat_and.match(line_clean)
+        m_pc = CHAT_PC.match(line_clean); m_ios = CHAT_IOS.match(line_clean); m_and = CHAT_AND.match(line_clean)
         time_info = None
         if m_pc: name, ampm, h, mnt, msg = m_pc.groups(); time_info = (ampm, h, mnt)
         elif m_ios: y, m, d, ampm, h, mnt, name, msg = m_ios.groups(); current_date = f"{y}-{m.zfill(2)}-{d.zfill(2)}"; time_info = (ampm, h, mnt)
@@ -73,16 +79,18 @@ def parse_kakao_file(file_content):
             if ampm == '오후' and hour != 12: hour += 12
             if ampm == '오전' and hour == 12: hour = 0
             minute_key = f"{current_date} {hour:02d}:{mnt.zfill(2)}"
+            
             if minute_key == last_seen_minute_key: ms_offset += 1
             else: last_seen_minute_key = minute_key; ms_offset = 0
+            
             time_str = f"{minute_key[-5:]}:00.{ms_offset:03d}"
-            data.append({'Datetime': pd.to_datetime(f"{current_date} {time_str}"), 'Date': current_date, 'Name': name, 'Message': msg, 'Type': 'Chat', 'Source': 'iPhone' if m_ios else ('Android' if m_and else 'PC')})
+            data.append({'Datetime_Str': f"{current_date} {time_str}", 'Date': current_date, 'Name': name, 'Message': msg, 'Type': 'Chat', 'Source': 'iPhone' if m_ios else ('Android' if m_and else 'PC')})
             continue
 
-        m_sys_ios = sys_ios.match(line_clean); m_sys_and = sys_and.match(line_clean); m_sys_pc = sys_pc.match(line_clean)
+        m_sys_ios = SYS_IOS.match(line_clean); m_sys_and = SYS_AND.match(line_clean); m_sys_pc = SYS_PC.match(line_clean)
         if m_sys_ios or m_sys_and:
             y, m, d, ampm, h, mnt, name, josa, action = (m_sys_ios or m_sys_and).groups()
-            if (josa, action) in valid_sys_combos:
+            if (josa, action) in VALID_SYS_COMBOS:
                 current_date = f"{y}-{m.zfill(2)}-{d.zfill(2)}"; hour = int(h)
                 if ampm == '오후' and hour != 12: hour += 12
                 if ampm == '오전' and hour == 12: hour = 0
@@ -90,26 +98,29 @@ def parse_kakao_file(file_content):
                 if minute_key == last_seen_minute_key: ms_offset += 1
                 else: last_seen_minute_key = minute_key; ms_offset = 0
                 time_str = f"{minute_key[-5:]}:00.{ms_offset:03d}"
-                data.append({'Datetime': pd.to_datetime(f"{current_date} {time_str}"), 'Date': current_date, 'Name': name, 'Message': f"{name}{josa} {action}", 'Type': 'System', 'Source': 'iPhone' if m_sys_ios else 'Android'})
+                data.append({'Datetime_Str': f"{current_date} {time_str}", 'Date': current_date, 'Name': name, 'Message': f"{name}{josa} {action}", 'Type': 'System', 'Source': 'iPhone' if m_sys_ios else 'Android'})
             continue
         elif m_sys_pc:
             name, josa, action = m_sys_pc.groups()
-            if (josa, action) in valid_sys_combos and current_date and len(name) < 40: 
+            if (josa, action) in VALID_SYS_COMBOS and current_date and len(name) < 40: 
                 minute_key = last_seen_minute_key if last_seen_minute_key else f"{current_date} 00:00"
                 if minute_key == last_seen_minute_key: ms_offset += 1
                 else: last_seen_minute_key = minute_key; ms_offset = 0
                 time_str = f"{minute_key[-5:]}:00.{ms_offset:03d}"
-                data.append({'Datetime': pd.to_datetime(f"{current_date} {time_str}"), 'Date': current_date, 'Name': name, 'Message': f"{name}{josa} {action}", 'Type': 'System', 'Source': 'PC'})
+                data.append({'Datetime_Str': f"{current_date} {time_str}", 'Date': current_date, 'Name': name, 'Message': f"{name}{josa} {action}", 'Type': 'System', 'Source': 'PC'})
             continue
 
         if data and data[-1]['Type'] == 'Chat':
             data[-1]['Message'] += '\n' + line.replace('\r', '').replace('\n', '')
-    return pd.DataFrame(data)
+            
+    df = pd.DataFrame(data)
+    if not df.empty:
+        # 벡터화된 날짜 변환으로 속도 극대화
+        df['Datetime'] = pd.to_datetime(df['Datetime_Str'])
+        df.drop(columns=['Datetime_Str'], inplace=True)
+    return df
 
 # --- 웹 인터페이스 구성 ---
-st.markdown("### 📂 파일 업로드")
-
-# [추가됨] 사용자 안내 문구 표시
 st.info("""
 **카카오톡 텍스트(.txt) 또는 압축파일(.zip)을 업로드하세요.** iOS/안드로이드/PC 버전의 대화 파일을 모두 지원하지만  
 PC버전은 중간중간 대화가 끊겨있을 수 있기 때문에 모바일 기기의 대화 백업을 이용하시는 것을 추천드립니다.
@@ -119,7 +130,7 @@ uploaded_files = st.file_uploader("파일 업로드", type=["txt", "zip"], accep
 
 if uploaded_files:
     if st.button("분석 시작", type="primary"):
-        with st.spinner("데이터 분석 및 지능형 병합 중..."):
+        with st.spinner("데이터 고속 분석 및 지능형 병합 중..."):
             df_list = []
             for uf in uploaded_files:
                 if uf.name.lower().endswith('.zip'):
@@ -167,8 +178,15 @@ if uploaded_files:
             
             def get_history(x):
                 x = x.sort_values('Datetime')
-                actions = [f"[{row['Date']}] 입장" if "들어왔습니다" in row['Message'] else (f"[{row['Date']}] 퇴장" if "나갔습니다" in row['Message'] else f"[{row['Date']}] 강퇴") 
-                           for _, row in x.iterrows() if any(k in row['Message'] for k in ["들어왔습니다", "나갔습니다", "내보냈습니다"])]
+                actions = []
+                
+                # [최적화 3] iterrows() 대신 itertuples() 사용 (압도적인 속도 향상)
+                for row in x.itertuples():
+                    msg = row.Message
+                    date_str = row.Date
+                    if "들어왔습니다" in msg: actions.append(f"[{date_str}] 입장")
+                    elif "나갔습니다" in msg: actions.append(f"[{date_str}] 퇴장")
+                    elif "내보냈습니다" in msg: actions.append(f"[{date_str}] 강퇴")
                 
                 last_sys_date = x.iloc[-1]['Datetime'] if not x.empty else pd.Timestamp.min
                 
@@ -195,7 +213,6 @@ if uploaded_files:
             df_exit = final_summary[is_exited].sort_values('Last_Sys_Date', ascending=False).drop(columns=['Last_Action_Type', 'Last_Sys_Date'])
             df_sleep = final_summary[~is_exited].drop(columns=['Last_Action_Type', 'Last_Sys_Date']).sort_values('Last_Chat_Date', ascending=True)
 
-            # --- 테이블 가독성 설정 ---
             col_cfg = {
                 "Last_Message": st.column_config.TextColumn("마지막 메시지", width="medium"),
                 "Name": st.column_config.TextColumn("이름", width="medium"),
@@ -203,8 +220,29 @@ if uploaded_files:
                 "Count": st.column_config.NumberColumn("채팅수", width="small")
             }
 
-            st.success(f"분석 완료! (총 {len(df_final_master)}행)")
+            # --- [기능 부활] 엑셀 다운로드 파일 생성 ---
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df_curr.to_excel(writer, sheet_name='현재 인원', index=False)
+                df_exit.to_excel(writer, sheet_name='나간 인원', index=False)
+                df_sleep.to_excel(writer, sheet_name='잠수 인원', index=False)
+                df_final_master.to_excel(writer, sheet_name='Raw_Log', index=False)
+            processed_data = output.getvalue()
+
+            st.success(f"분석 완료! (총 {len(df_final_master):,}행 처리됨)")
             
+            # 다운로드 버튼 노출 (화면 우측 정렬 효과를 위해 컬럼 사용)
+            col1, col2 = st.columns([8, 2])
+            with col2:
+                st.download_button(
+                    label="📥 엑셀 파일로 다운로드",
+                    data=processed_data,
+                    file_name=f"카카오톡_분석결과_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            
+            # --- 탭 출력 ---
             tab1, tab2, tab3, tab4 = st.tabs([f"🟢 현재 인원 ({len(df_curr)}명)", f"🔴 나간 인원 ({len(df_exit)}명)", "💤 잠수 인원", "📝 Raw Log"])
             
             with tab1:
