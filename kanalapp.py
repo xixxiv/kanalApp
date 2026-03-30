@@ -108,7 +108,14 @@ def parse_kakao_file(file_content):
 
 # --- 웹 인터페이스 구성 ---
 st.markdown("### 📂 파일 업로드")
-uploaded_files = st.file_uploader("카카오톡 텍스트(.txt) 또는 압축파일(.zip)을 업로드하세요.", type=["txt", "zip"], accept_multiple_files=True)
+
+# [추가됨] 사용자 안내 문구 표시
+st.info("""
+**카카오톡 텍스트(.txt) 또는 압축파일(.zip)을 업로드하세요.** iOS/안드로이드/PC 버전의 대화 파일을 모두 지원하지만  
+PC버전은 중간중간 대화가 끊겨있을 수 있기 때문에 모바일 기기의 대화 백업을 이용하시는 것을 추천드립니다.
+""")
+
+uploaded_files = st.file_uploader("파일 업로드", type=["txt", "zip"], accept_multiple_files=True, label_visibility="collapsed")
 
 if uploaded_files:
     if st.button("분석 시작", type="primary"):
@@ -163,7 +170,6 @@ if uploaded_files:
                 actions = [f"[{row['Date']}] 입장" if "들어왔습니다" in row['Message'] else (f"[{row['Date']}] 퇴장" if "나갔습니다" in row['Message'] else f"[{row['Date']}] 강퇴") 
                            for _, row in x.iterrows() if any(k in row['Message'] for k in ["들어왔습니다", "나갔습니다", "내보냈습니다"])]
                 
-                # 정렬을 위한 가장 최근 시스템 일자 추출
                 last_sys_date = x.iloc[-1]['Datetime'] if not x.empty else pd.Timestamp.min
                 
                 if not actions:
@@ -184,12 +190,9 @@ if uploaded_files:
             final_summary = pd.merge(summary, sys_sum, on='Name', how='outer').fillna({'Count':0, 'Last_Message':'-', 'First_Action':'-', 'Action_History':'-'})
             is_exited = final_summary['Last_Action_Type'].str.contains('나갔습니다|내보냈습니다', na=False)
 
-            # --- 결과 뷰 데이터 생성 (정렬 조건 반영) ---
+            # --- 결과 뷰 데이터 생성 ---
             df_curr = final_summary[~is_exited].drop(columns=['Last_Action_Type', 'Last_Sys_Date']).sort_values('Count', ascending=False)
-            
-            # [요청 사항] 나간 인원은 활동 히스토리가 가장 최근인 순서대로 정렬
             df_exit = final_summary[is_exited].sort_values('Last_Sys_Date', ascending=False).drop(columns=['Last_Action_Type', 'Last_Sys_Date'])
-            
             df_sleep = final_summary[~is_exited].drop(columns=['Last_Action_Type', 'Last_Sys_Date']).sort_values('Last_Chat_Date', ascending=True)
 
             # --- 테이블 가독성 설정 ---
